@@ -1,0 +1,260 @@
+---
+title: 'Math 218: Final Report'
+author: "Christina Chen, Siyuan Niu"
+date: "12/16/2022"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+subtitle: Team-CN
+---
+<style type="text/css">
+  body{
+  font-size: 12pt;
+  font-family: Times New Roman;
+  spacing: 1.5
+}
+</style>
+
+```{r packages-data, include = F}
+# load packages and data here
+library(tidyverse)
+library(ggplot2)
+library(scales)
+library(glmnet)
+library(tree)
+library(MASS)
+library(e1071)
+```
+
+## Introduction
+
+Heart disease is one of the leading causes of death in the United States. About 697,000 people in the United States died from heart disease in 2020 — that is one in every five deaths. In order to better inform the public about the risk factors for heart disease, the CDC named high blood pressure, high cholesterol, and smoking as three critical factors. However, there are other medical conditions and lifestyle choices, including diabetes, physical inactivity, excessive alcohol use, etc., that can put people at a higher risk for heart disease. Therefore, physical health indicators and demographic information besides the three key factors are often equally imperative in predicting whether an individual has heart disease. This final project aims to answer two research questions: 1) What combination of demographic and physical health indicators yields the least misclassification rate in lasso logistic regression? 2) Among the best lasso logistic regression, a pruned decision tree, and a Naive Bayes mode, which model performs best in predicting heart disease? 
+
+Data used to answer the two research questions came from the CDC's annual telephone survey, which surveyed U.S. residents' health status. The observation unit in this 2020 CDC survey dataset is individual, with a total of 319,795 observations. Although the original dataset contained nearly 300 variables, we reduced the dataset to only 17 variables for analysis and simplicity purposes. Some health indicators included body mass index, alcohol consumption status, physical activity, and only one of the three key risk factors - smoking. Other categorical variables that remained in this dataset are gender, age, and race. Additionally, the response variable is a binary variable that indicates whether a person has heart disease. 
+
+## EDA
+The unbalanced nature of this dataset is shown in *Table 1*, as only 8.65% of the total individuals reported having heart disease. Body Mass Index (BMI), Sleep Time, Mental Health, and Physical Health are the four continuous variables in this dataset, reflecting each individual's health status. \
+```{r echo = F, message = F,warning= F}
+
+# Read data and factor string variables
+hd <- read.csv("/Users/cc/Desktop/MATH218/final-project-TeamCN/data/heart_2020_cleaned.csv", stringsAsFactors = TRUE)
+
+# For continuous indicator
+hd_plot_continous <- hd %>%
+  dplyr::select(HeartDisease, MentalHealth, BMI, PhysicalHealth, SleepTime)
+
+plot_df <- hd_plot_continous %>%
+  pivot_longer(cols = -HeartDisease, names_to = "variable", values_to = "value")
+## take a look at the plot_df data frame by clicking on its name in the Environment
+
+# Create a table for proportion
+tab <- matrix(c("91.44%", "8.65%"), ncol=2, byrow=TRUE)
+colnames(tab) <- c('No-Heart Disease','Yes-Heart Disease')
+rownames(tab) <- c('Proportion')
+tab <- as.table(tab)
+knitr::kable(tab)
+```
+##### *Table 1*. The proportion of Respondents w/o Heart Disease.\
+
+On the one hand, some health and demographic predictors have already demonstrated a significant variation between people wsho claimed to have heart disease and those do did not have it through EDA. In particular, *Figure 2* showed that people who reported having heart disease exhibited a more significant number of days to have not good physical health during the past 30 days than their counterparts who did not have heart disease. In addition, a higher proportion of people claimed to have heart disease among people whose ages fall into the following three ranges: 70-74, 75-79, and 80 or older, as shown in *Figure 3*. Smoking is another effective indicator of predicting heart disease, underscored in *Figure 3*, as among the 8.65% of people who had heart disease, a higher proportion of them claimed to smoke at least 100 cigarettes (5 packs) in their entire life. On the other hand, summary statistics and EDA failed to provide any more helpful information regarding what are the most reliable health factors that can be used to predict heart disease. Hence, further research is necessary to address these research questions.
+
+```{r EDA1, echo = F, message = F,warning= F}
+# Continuous
+plot_df %>%
+  ggplot(., aes(x = HeartDisease, y = value, fill = HeartDisease)) +
+  geom_boxplot()+
+  scale_fill_grey()+
+  facet_wrap(~ variable, scales = "free") +
+  ggtitle("Comparision in variations regarding Heart Disease Status") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+*Figure 1*. A comparison of the variations in Heart Disease Status across four continuous variables. No obvious difference was observed between people who had heart disease and people who did not for BMI and Sleep Time. Nevertheless, a higher proportion of people with heart disease reported having more days of bad physical health conditions. 
+
+```{r EDA2, echo = F, message = F,warning= F}
+# Summary Statistics for Race and GenHealth AgeCategory
+categorical_hd_plot <- hd %>%
+  dplyr::select(-MentalHealth, -BMI,  -PhysicalHealth, -SleepTime)
+
+plot_df_cat <- categorical_hd_plot %>%
+  pivot_longer(cols = -HeartDisease, names_to = "variable", values_to = "value")
+
+plot_df_cat %>%
+  ggplot(., aes(x = value, fill = HeartDisease)) +
+  geom_bar() +
+  scale_fill_grey()+
+  facet_wrap(~ variable, scales = "free") +
+  ggtitle("The Distribution of Categorical Variables") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(strip.text.x = element_text(size = 5))
+```
+*Figure 2*. A comparison of the variations in Heart Disease Status across thirteen categorical variables. Age Category and Smoking are effective predictors demonstrating evident variations in the Heart Disease Status. 
+
+## Methodology
+
+The purpose of this section is to develop methods for obtaining the optimal model for the binary classification task of heart disease. The logistic is to divide the dataset into train/test splits, perform model hyperparameter tuning and obtain the optimal model for lasso logistic regression, decision tree, and Naive Bayes, and finally select the best model out of the three models based on yielded error rate. 
+
+Given the imbalanced nature of the dataset, we first obtain the “ids” of observations with and without heart disease separately and perform a random 60-40 train-test split on the full dataset. Then we combine the train “ids” of the two sets with 60 percent of the whole dataset and the rest test “ids” as the remaining 40 percent. 
+
+We then perform parameter tuning of the models. The optimal lambda parameter of the lasso logistic regression is selected by running k-fold cross-validation using the training dataset. Specifically, the k is set to 10, and the random seed is set to 10. To figure out whether there exists an optimal level of tree complexity, we first fit a classification decision tree on the training set. Then, we run another 10-fold cross-validation using this trained model to find the optimal. Using the misclassification rate of pruned and unpruned trees, we can determine which was the best among the two. Lastly, no parameter tuning is done for the Naive Bayes model. 
+
+After training each model on the same training set, we compare the accuracy of the three models based on their misclassification rate on the test dataset. In particular, we will calculate the misclassification rate by using the confusion matrix of each model.
+
+One advantage of obtaining the lasso regression model is that it can give us insights into the significance of each indicator. By running lasso logistic regression on the entire dataset, we can obtain the set of significant and irrelevant indicators by looking at estimated regression coefficients. Specifically, a zero coefficient would indicate the corresponding indicator is relatively irrelevant to consider.        
+
+## Results
+The optimal lasso logistic regression with its best lambda value chosen by 10-fold cross-validation contained twelve of the seventeen predictors. The combination of predictors that produce the least misclassification and their corresponding coefficients are shown in *Table 2*. 
+                 
+According to *Table 7*, the lasso logistics regression has the lowest test misclassification rate, the Naive Bayes model has the highest test misclassification rate but the lowest test false negative rate, and the decision tree model yields the same result for test misclassification rate and test false negative *Table 5* and *Table 7*. 
+
+Notice that we use the misclassification rate of an unpruned 5-node tree instead of a pruned 1-node tree, because both has the same cross-validation error, as shown in *Table 4*. Therefore, pruning in this case fails to improve the tree's performance in prediction. 
+
+```{r resampling, echo = F, message = F, warning= F}
+##1 60-40 Train-test spint
+# Obtain the proportion of the response variable
+# hd %>% filter(HeartDisease == "No") %>% count()
+
+# Create a training set that has the same response variable distribution as that of the whole dataset
+
+yes_ids<-data.frame(as.numeric(rownames(hd[hd$HeartDisease=="Yes",])))
+no_ids<-data.frame(as.numeric(rownames(hd[hd$HeartDisease=="No",])))
+pr <- nrow(yes_ids)/ (nrow(yes_ids) +nrow(no_ids))
+
+set.seed(10)
+train_yes_id <- sample(1:nrow(yes_ids), round(0.6*nrow(yes_ids)))
+train_no_id <- sample(1:nrow(no_ids), round(0.6*nrow(no_ids)))
+
+train_ids <- c(train_yes_id,train_no_id)
+test_ids <- (1:nrow(hd))[-train_ids]
+
+train_set<- hd[train_ids,]
+test_set<- hd[test_ids,]
+```
+
+```{r lasso, echo = F, message = F,warning= F}
+##2 Lasso logistics regression
+
+# CV to obtain the best lamda
+
+set.seed(10)
+
+x<-model.matrix(HeartDisease ~., hd)[,-1]
+y<-hd$HeartDisease
+
+cv_out <- cv.glmnet(x[train_ids,], y[train_ids], family = "binomial",alpha = 1, nfolds = 5, type.measure = "class")
+best_lam <- cv_out$lambda.min
+
+ ## try a smaller K, i.e. fewer folds, to ensure that there are enough observations where y = 1 in each fold
+
+# Fit the best lamda on the whole train dataset to obtain the coefficients
+lasso_final<- glmnet(x[train_ids,], y[train_ids], alpha = 1, family="binomial",lambda = best_lam)
+
+lasso_coef <- predict(lasso_final, type = "coefficients", s = best_lam)[1:38,]
+
+# Show predictors with 0 coefficients
+lasso_coef[lasso_coef != 0]
+```
+*Table 2*. Coefficients of all the predictors that were remained in the model after performing the best lasso logistic regression.
+
+
+```{r echo = F, message = F,warning= F}
+# Obtain predicted Y's on test data
+lasso_pred <- predict(lasso_final, s = best_lam,newx = x[test_ids,],type = "class")
+
+lasso_mx<-table(preds =lasso_pred, true = hd[test_ids,]$HeartDisease )
+
+# Obtain the confusion matrix and the misclassification rate
+mr_lasso<-mean(lasso_pred!=hd[test_ids,]$HeartDisease)
+
+fn_lasso <- lasso_mx[1,2]/(lasso_mx[1,2] + lasso_mx[1,1])
+
+lasso_mx
+```
+*Table 3*. Confusion Matrix for best lasso logistic regression.
+
+
+```{r Decision Tree, echo = F, message = F,warning= F}
+##3 Tree model
+# Obtain the unpruned tree model
+
+tree_hd <- tree(HeartDisease ~., data = hd[train_ids,])
+# summary(tree_hd)
+tree_preds <- predict(tree_hd, hd[test_ids,], type = "class")
+
+tree_mx <- table(preds = tree_preds, true = hd[test_ids,]$HeartDisease)
+
+
+ ## obtain the misclassification rate of the unpruned tree
+mr_tree<- mean(tree_preds!=hd[test_ids,]$HeartDisease)
+
+# CV to obtain the best pruned tree
+set.seed(10)
+cv_hd <- cv.tree(tree_hd, FUN = prune.misclass, K = 5)
+
+fn_tree <- tree_mx[1,2]/(tree_mx[1,2] + tree_mx[1,1])
+# Pruning does not improve the tree's performance so we use the misclassification rate of the unpruned tree
+cv_hd
+```
+*Table 4*. Result of CV and pruning for the tree model
+
+```{r, echo = F, message = F,warning= F}
+tree_mx
+```
+
+*Table 5*. Confusion Matrix for the unpruned tree model.
+
+
+```{r Naive Bayes, echo = F, message = F,warning= F}
+##4 Naive Bayes
+nb_mod <- naiveBayes(HeartDisease ~ ., data = hd[train_ids,])
+
+
+nb_preds <- predict(nb_mod, hd[test_ids,])
+nb_mx <- table(preds = nb_preds, true = hd[test_ids,]$HeartDisease)
+
+nb_mx
+mr_nb <- mean(nb_preds!=hd[test_ids,]$HeartDisease)
+
+fn_nb <- nb_mx[1,2]/(nb_mx[1,2] + nb_mx[1,1])
+
+```
+*Table 6*. Confusion Matrix for the Naive Bayes model.
+
+
+```{r Comparision, echo = F, message = F,warning= F}
+##5 Compare the misclassification and false negatieve rate of lasso, tree, and N.B..
+
+df1 <- data.frame(model = c("Lasso Logit", "Tree", "Naive Bayes"),
+                  missclassification = c(mr_lasso, mr_tree, mr_nb),
+                 false_negative = c(fn_lasso, fn_tree, fn_nb)
+                 )
+
+df1
+```
+*Table 7*. Summary of misclassification rate and false negative rate across three models.
+
+
+## Discussion
+## Why are all misclassifications of the tree model false negatives?
+
+There exists a bias toward the majority class because the majority vote performed at each node in a tree ignores numeric differences. But Naive Bayes and logistics regression are more sensitive to the numeric differences by accounting for probabilities of each category. As a result, tree-based methods fail to perform well for highly imbalanced data.
+
+
+## Which model is perferred in practice?
+When predicting heart disease, we consider the false negative rate more critical than the overall misclassification rate, since it is worse to predict someone who does not have heart disease but in fact has one. 
+
+Based on *Table 3* and *Table 5*, all misclassifications in tree models are false negatives, as are most misclassifications in lasso logistic regression. Therefore, we recommend using the Naive Bayes model in practice, given its lowest test false negative rate (*Table 6*). 
+
+## How different seed might affect error rates?
+We are also aware that changing the seeds for the train-test split may affect test misclassification rates. By trying different seeds, we may be able to see what effect they have.
+
+## Future work - an alternative comparing method
+When comparing different models, cross-validation is an alternative to the validation set approach. We obtain and compare the candidate with the lowest misclassification rate across each model type, with each candidate derived from a different fold or test data set. 
+
+We adjusted the random sampling of the train-test split of the imbalanced data but not that for cross-validation when obtaining the best lambda. Thus, we may implement a lasso logistic regression with balanced folds to obtain a better lambda.
+
+## Reference
+https://www.kaggle.com/datasets/kamilpytlak/personal-key-indicators-of-heart-disease
+
+
